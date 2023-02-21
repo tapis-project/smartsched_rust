@@ -13,6 +13,7 @@ use shellexpand;
 // ***************************************************************************
 // The file that contains the complete mysql database url, including password.
 const DB_URL_FILE: &str = "~/smartsched-db.url";
+const DEFAULT_OUTPUT_TABLE: &str = "jobq_history";
 
 // ***************************************************************************
 //                                  Structs
@@ -52,20 +53,20 @@ pub struct DBtarget {
     pub max_minutes: i32,
     pub queue_minutes: i32,
     pub backlog_minutes: i32,
-    pub backlog_num_of_jobs: i32,
+    pub backlog_num_jobs: i32,
 }
 
 impl DBtarget {
-    fn new(src: DBsource, backlog_minutes: i32, backlog_num_of_jobs: i32) -> DBtarget {
+    fn new(src: DBsource, backlog_minutes: i32, backlog_num_jobs: i32) -> DBtarget {
         DBtarget {jobid: src.jobid, submit: src.submit, start: src.start, max_minutes: src.max_minutes, queue_minutes: src.queue_minutes,
-                  backlog_minutes, backlog_num_of_jobs}
+                  backlog_minutes, backlog_num_jobs}
     }
 }
 
 impl fmt::Display for DBtarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}, {}, {}, {}, {}, {}, {}", self.jobid, self.submit, self.start, self.max_minutes, self.queue_minutes,
-                                                self.backlog_minutes, self.backlog_num_of_jobs)
+                                                self.backlog_minutes, self.backlog_num_jobs)
     }
 }
 
@@ -97,6 +98,9 @@ fn main() {
     // Connect to the database and panic if we can't.
     let pool = Pool::new(url.as_str()).unwrap();
     let mut conn = pool.get_conn().unwrap();
+
+    // Create the output table.
+    create_output_table(&mut conn, DEFAULT_OUTPUT_TABLE);
 
     // Create the queue with a capacity not likely to be exceeded.
     let mut backlog_queue: Vec<DBsource> = Vec::with_capacity(256);
@@ -164,6 +168,35 @@ fn main() {
 // ---------------------------------------------------------------------------
 fn load_db_url() -> String {
     fs::read_to_string(get_absolute_path(DB_URL_FILE)).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// create_output_table:
+// ---------------------------------------------------------------------------
+fn create_output_table(conn: &mut PooledConn, table_name: &str) {
+
+    // Drop the output table if it already exists.
+    conn.query_drop("DROP TABLE IF EXISTS ".to_owned() + table_name).unwrap();
+
+    // Create a new table.
+    let create_table = "CREATE TABLE :table_name \
+                             (jobid varchar(30) NOT NULL PRIMARY KEY, \
+                             submit datetime NOT NULL, \
+                             start datetime NOT NULL, \
+                             max_minutes int unsigned NOT NULL, \
+                             queue_minutes int unsigned NOT NULL, \
+                             backlog_minutes int unsigned NOT NULL, \
+                             backlog_num_jobs int unsigned NOT NULL)";
+    let create_cmd = create_table.replacen(":table_name", table_name, 1);
+    conn.query_drop(create_cmd).unwrap();
+
+    // Create indexes on output table.
+    conn.query_drop("CREATE INDEX index_submit ON ".to_owned() + table_name + " (submit)").unwrap();
+    conn.query_drop("CREATE INDEX index_start ON ".to_owned() + table_name + " (start)").unwrap();
+    conn.query_drop("CREATE INDEX index_max_minutes ON ".to_owned() + table_name + " (max_minutes)").unwrap();
+    conn.query_drop("CREATE INDEX index_queue_minutes ON ".to_owned() + table_name + " (queue_minutes)").unwrap();
+    conn.query_drop("CREATE INDEX index_backlog_minutes ON ".to_owned() + table_name + " (backlog_minutes)").unwrap();
+    conn.query_drop("CREATE INDEX index_backlog_num_jobs ON ".to_owned() + table_name + " (backlog_num_jobs)").unwrap();
 }
 
 // ---------------------------------------------------------------------------
