@@ -75,6 +75,14 @@ impl fmt::Display for DBtarget {
 // ---------------------------------------------------------------------------
 // main:
 // ---------------------------------------------------------------------------
+/** This program plays back the history of a set of jobs to recreate the backlog
+ * of jobs at the time of each job's submission.  We calculate the total time
+ * requested by the jobs in the backlog and the number of jobs in the backlog
+ * for each job. 
+ * 
+ * Currently, we just print the results to the console, but the ultimate  
+ * destination for this information would a database.
+ */
 fn main() {
     // Connection information including password.
     let url = load_db_url();
