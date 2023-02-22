@@ -244,6 +244,7 @@ dependencies = [
  "js-sys",
  "num-integer",
  "num-traits",
+ "serde",
  "time 0.1.45",
  "wasm-bindgen",
  "winapi",
@@ -912,6 +913,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "cc",
+ "chrono",
  "cmake",
  "crc32fast",
  "flate2",
@@ -1425,6 +1427,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mysql",
+ "mysql_common",
  "path-absolutize",
  "shellexpand",
 ]
