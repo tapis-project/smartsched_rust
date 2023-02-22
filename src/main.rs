@@ -158,13 +158,11 @@ fn main() {
                 // Create the current job's output record.
                 let cur_job_output = DBtarget::new(cur_job, cur_queue_minutes, cur_backlog_len);           
                 output_records.push(cur_job_output);
-                //insert_output(&mut conn2, &insert_stmt, cur_job_output);
                 
                 // Print a message every time we commit a group of output records.
                 num_rows += 1;
                 if (num_rows % DEFAULT_COMMIT_BATCH_SIZE) == 0 {
                     println!("Database rows read = {}.", num_rows);
-                    //conn2.query_drop("COMMIT").expect("Batch commit failure.");
                 }
             },
             Err(e) => {
@@ -176,8 +174,10 @@ fn main() {
 
     // Commit any residual rows.
     println!("Database rows read = {}.", num_rows);
-    conn2.query_drop("COMMIT").expect("Final commit on conn2 failure."); 
     conn1.query_drop("COMMIT").expect("Final commit on conn1 failure.");
+
+    // Write all 
+    let write_result = write_output(&mut conn2, &insert_stmt, output_records);
 
     // Create indexes after all rows loaded.
     create_indexes(&mut conn2, DEFAULT_OUTPUT_TABLE);
@@ -185,7 +185,10 @@ fn main() {
     // Print results.
     println!("\nElapsed time: {:.2?}", before.elapsed());
     println!("Total rows read  = {}", num_rows);
-    println!("Total row errors = {}", num_row_err);
+    println!("Total row read errors = {}", num_row_err);
+    println!("Total rows written = {}", write_result.0);
+    println!("Total row write errors = {}", write_result.1);
+
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +247,47 @@ fn get_insert_stmt(conn: &mut PooledConn, table_name: &str) -> Statement {
     conn.query_drop("SET autocommit=0").expect("Set autocommit off failure.");
 
     stmt        
+}
+
+// ---------------------------------------------------------------------------
+// write_output:
+// ---------------------------------------------------------------------------
+fn write_output(conn: &mut PooledConn, stmt: &Statement, recs: Vec<DBtarget>) -> (i32, i32) {
+
+    // Write each output record to the database.
+    let mut num_rows = 0;
+    let mut num_rows_err = 0;
+    println!("\nStarting to write {} output records to the database.", recs.len());
+    for rec in recs {
+        match conn.exec_drop(stmt, params! {
+            "jobid" => rec.jobid,
+            "submit" => rec.submit.to_string(),
+            "start" =>  rec.start.to_string(),
+            "max_minutes" => rec.max_minutes,
+            "queue_minutes" => rec.queue_minutes,
+            "backlog_minutes" => rec.backlog_minutes,
+            "backlog_num_jobs" => rec.backlog_num_jobs,
+        }) {
+            Ok(_) => {
+                num_rows += 1;
+                if (num_rows % DEFAULT_COMMIT_BATCH_SIZE) == 0 {
+                    println!("Database rows written = {}.", num_rows);
+                    conn.query_drop("COMMIT").expect("Batch commit failure.");
+                }
+            },
+            Err(e) => {
+                num_rows += 1; num_rows_err += 1;
+                println!("Error writing record {} to database: {}", num_rows, e);
+            }
+        }
+    }
+
+    // Commit any residual rows.
+    println!("Database rows written = {}.", num_rows);
+    conn.query_drop("COMMIT").expect("Final commit on conn2 failure.");
+
+    // Return the stats.
+    (num_rows, num_rows_err) 
 }
 
 // ---------------------------------------------------------------------------
