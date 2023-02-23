@@ -14,7 +14,8 @@ use shellexpand;
 // The file that contains the complete mysql database url, including password.
 const DB_URL_FILE: &str = "~/smartsched-db.url";
 const DEFAULT_OUTPUT_TABLE: &str = "jobq_history";
-const DEFAULT_COMMIT_BATCH_SIZE: i32 = 10000;
+const DEFAULT_READ_BATCH_SIZE: i32 = 10000;
+const DEFAULT_WRITE_BATCH_SIZE: i32 = 1000;
 
 // ***************************************************************************
 //                                  Structs
@@ -99,12 +100,10 @@ fn main() {
     // Connect to the database and panic if we can't.
     let pool = Pool::new(url.as_str()).expect("Failed to create pool.");
     let mut conn1 = pool.get_conn().expect("Failed to create conn1.");
-    let mut conn2 = pool.get_conn().expect("Failed to create conn2.");
+    //let mut conn2 = pool.get_conn().expect("Failed to create conn2.");
 
     // Create the output table using the first connection.
-    // Prepare the insert statement on the second connection.
     create_output_table(&mut conn1, DEFAULT_OUTPUT_TABLE);
-    let insert_stmt = get_insert_stmt(&mut conn2, DEFAULT_OUTPUT_TABLE);
 
     // Create the queue with a capacity not likely to be exceeded.
     let mut backlog_queue: Vec<DBsource> = Vec::with_capacity(256);
@@ -161,7 +160,7 @@ fn main() {
                 
                 // Print a message every time we commit a group of output records.
                 num_rows += 1;
-                if (num_rows % DEFAULT_COMMIT_BATCH_SIZE) == 0 {
+                if (num_rows % DEFAULT_READ_BATCH_SIZE) == 0 {
                     println!("Database rows read = {}.", num_rows);
                 }
             },
@@ -176,11 +175,12 @@ fn main() {
     println!("Database rows read = {}.", num_rows);
     conn1.query_drop("COMMIT").expect("Final commit on conn1 failure.");
 
-    // Write all 
-    let write_result = write_output(&mut conn2, &insert_stmt, output_records);
+    // Write all output records to the database.
+    let write_result = write_output(&mut conn1, output_records);
 
     // Create indexes after all rows loaded.
-    create_indexes(&mut conn2, DEFAULT_OUTPUT_TABLE);
+    println!("Creating indexes.");
+    create_indexes(&mut conn1, DEFAULT_OUTPUT_TABLE);
 
     // Print results.
     println!("\nElapsed time: {:.2?}", before.elapsed());
@@ -233,33 +233,22 @@ fn create_indexes(conn: &mut PooledConn, table_name: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// get_insert_stmt:
-// ---------------------------------------------------------------------------
-fn get_insert_stmt(conn: &mut PooledConn, table_name: &str) -> Statement {
-    // Build the insert statement with placeholders.
-    let insert = "INSERT INTO :table_name \
-            (jobid, submit, start, max_minutes, queue_minutes, backlog_minutes, backlog_num_jobs) \
-            VALUES (:jobid, :submit, :start, :max_minutes, :queue_minutes, :backlog_minutes, :backlog_num_jobs)";
-    let insert_cmd = insert.replacen(":table_name", table_name, 1);
-    let stmt = conn.prep(insert_cmd).expect("Prepare statement failure.");
-
-    // Set automcommit off on this connection so that inserts are committed in bulk.
-    conn.query_drop("SET autocommit=0").expect("Set autocommit off failure.");
-
-    stmt        
-}
-
-// ---------------------------------------------------------------------------
 // write_output:
 // ---------------------------------------------------------------------------
-fn write_output(conn: &mut PooledConn, stmt: &Statement, recs: Vec<DBtarget>) -> (i32, i32) {
+fn write_output(conn: &mut PooledConn, recs: Vec<DBtarget>) -> (i32, i32) {
+
+    // Prepare the insert statement so it can be reused by the database.
+    let stmt = get_insert_stmt(conn, DEFAULT_OUTPUT_TABLE);
+
+    // ---- Set automcommit off on this connection so that inserts are committed in bulk.
+    conn.query_drop("SET autocommit=0").expect("Set autocommit OFF failure.");
 
     // Write each output record to the database.
     let mut num_rows = 0;
     let mut num_rows_err = 0;
     println!("\nStarting to write {} output records to the database.", recs.len());
     for rec in recs {
-        match conn.exec_drop(stmt, params! {
+        match conn.exec_drop(&stmt, params! {
             "jobid" => rec.jobid,
             "submit" => rec.submit.to_string(),
             "start" =>  rec.start.to_string(),
@@ -269,15 +258,18 @@ fn write_output(conn: &mut PooledConn, stmt: &Statement, recs: Vec<DBtarget>) ->
             "backlog_num_jobs" => rec.backlog_num_jobs,
         }) {
             Ok(_) => {
+                // Commit at a different interval than printing progress messages.
                 num_rows += 1;
-                if (num_rows % DEFAULT_COMMIT_BATCH_SIZE) == 0 {
+                if (num_rows % DEFAULT_READ_BATCH_SIZE) == 0 {
                     println!("Database rows written = {}.", num_rows);
+                }
+                if (num_rows % DEFAULT_WRITE_BATCH_SIZE) == 0 {
                     conn.query_drop("COMMIT").expect("Batch commit failure.");
                 }
             },
             Err(e) => {
-                num_rows += 1; num_rows_err += 1;
-                println!("Error writing record {} to database: {}", num_rows, e);
+                num_rows_err += 1;
+                println!("Error writing record {} to database: {}", num_rows+1, e);
             }
         }
     }
@@ -286,30 +278,28 @@ fn write_output(conn: &mut PooledConn, stmt: &Statement, recs: Vec<DBtarget>) ->
     println!("Database rows written = {}.", num_rows);
     conn.query_drop("COMMIT").expect("Final commit on conn2 failure.");
 
+    // ---- Set automcommit back on.
+    match conn.query_drop("SET autocommit=1") {
+        Ok(_) => (),
+        Err(e) => {
+            println!("Set autocommit ON failure: {}", e);
+        },
+    };
+
     // Return the stats.
     (num_rows, num_rows_err) 
 }
 
 // ---------------------------------------------------------------------------
-// insert_output:
+// get_insert_stmt:
 // ---------------------------------------------------------------------------
-fn insert_output(conn: &mut PooledConn, stmt: &Statement, rec: DBtarget) {
-    // Insert a job's record in the output table..
-    match conn.exec_drop(stmt, params! {
-        "jobid" => rec.jobid,
-        "submit" => rec.submit.to_string(),
-        "start" =>  rec.start.to_string(),
-        "max_minutes" => rec.max_minutes,
-        "queue_minutes" => rec.queue_minutes,
-        "backlog_minutes" => rec.backlog_minutes,
-        "backlog_num_jobs" => rec.backlog_num_jobs,
-    }) {
-        Ok(_) => (),
-        Err(e) => {
-            println!("Error writing to database: {}", e);
-            ()
-        }
-    }
+fn get_insert_stmt(conn: &mut PooledConn, table_name: &str) -> Statement {
+    // Build the insert statement with placeholders.
+    let insert = "INSERT INTO :table_name \
+            (jobid, submit, start, max_minutes, queue_minutes, backlog_minutes, backlog_num_jobs) \
+            VALUES (:jobid, :submit, :start, :max_minutes, :queue_minutes, :backlog_minutes, :backlog_num_jobs)";
+    let insert_cmd = insert.replacen(":table_name", table_name, 1);
+    conn.prep(insert_cmd).expect("Prepare statement failure.")
 }
 
 // ---------------------------------------------------------------------------
