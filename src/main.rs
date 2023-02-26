@@ -49,21 +49,9 @@ impl Config {
     }
 
     fn println(&self) {
-        println!("input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups);
+        println!("Input configuration:  input_table={}, output_table={}, ignore_dups={}\n", self.input_table, self.output_table, self.ignore_dups);
     }
 }
-
-// impl fmt::Display for Config {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(f, "input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups)
-//     }
-// }
-
-// impl fmt::Debug for Config {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(f, "input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups)
-//     }
-// }
 
 // ---------------------------------------------------------------------------
 // DBsource:
