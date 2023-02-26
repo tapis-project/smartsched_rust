@@ -5,8 +5,9 @@ use std::{fmt, fs};
 use std::time::Instant;
 use std::ops::Deref;
 use std::path::Path;
+use std::env;
+use lazy_static::lazy_static;
 use path_absolutize::Absolutize;
-use shellexpand;
 
 // ***************************************************************************
 //                                Constants
@@ -18,8 +19,52 @@ const DEFAULT_READ_BATCH_SIZE: i32 = 10000;
 const DEFAULT_WRITE_BATCH_SIZE: i32 = 1000;
 
 // ***************************************************************************
+//                             Static Variables 
+// ***************************************************************************
+// Lazily initialize the parameters variable so that is has a 'static lifetime.
+// We exit if we can't read our parameters.
+lazy_static! {
+    // This regex matches "key=value" arguments where key and value are 
+        // alphanumeric or underscore and there is no embedded whitespace.
+    static ref CONFIG: Config = get_config();
+}
+
+// ***************************************************************************
 //                                  Structs
 // ***************************************************************************
+// ---------------------------------------------------------------------------
+// Config:
+// ---------------------------------------------------------------------------
+pub struct Config {
+    pub program_pathname: String,
+    pub input_table: String,
+    pub output_table: String,
+    pub ignore_dups: bool,
+}
+
+impl Config {
+    #[allow(dead_code)]
+    fn new(program_pathname: String, input_table: String, output_table: String, ignore_dups: bool) -> Config {
+        Config {program_pathname, input_table, output_table, ignore_dups}
+    }
+
+    fn println(&self) {
+        println!("input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups);
+    }
+}
+
+// impl fmt::Display for Config {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         write!(f, "input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups)
+//     }
+// }
+
+// impl fmt::Debug for Config {
+//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+//         write!(f, "input_table: {}, output_table: {}, ignore_dups: {}", self.input_table, self.output_table, self.ignore_dups)
+//     }
+// }
+
 // ---------------------------------------------------------------------------
 // DBsource:
 // ---------------------------------------------------------------------------
@@ -88,22 +133,23 @@ impl fmt::Display for DBtarget {
  */
 fn main() {
     // Connection information including password.
+    CONFIG.println();
     let url = load_db_url();
     
     // Adjust query as needed.
-    let select = "SELECT jobid, submit, start, max_minutes, \
+    let select1 = "SELECT jobid, submit, start, max_minutes, \
                        TIMESTAMPDIFF(MINUTE, submit, start) as queue_minutes \
-                       FROM stampede2 \
+                       FROM :input_table \
                        WHERE queue = 'normal' AND state = 'COMPLETED' \
                        ORDER BY submit ASC";
+    let select = select1.replacen(":input_table", &CONFIG.input_table, 1);
 
     // Connect to the database and panic if we can't.
     let pool = Pool::new(url.as_str()).expect("Failed to create pool.");
     let mut conn1 = pool.get_conn().expect("Failed to create conn1.");
-    //let mut conn2 = pool.get_conn().expect("Failed to create conn2.");
 
     // Create the output table using the first connection.
-    create_output_table(&mut conn1, DEFAULT_OUTPUT_TABLE);
+    create_output_table(&mut conn1);
 
     // Create the queue with a capacity not likely to be exceeded.
     let mut backlog_queue: Vec<DBsource> = Vec::with_capacity(256);
@@ -180,7 +226,7 @@ fn main() {
 
     // Create indexes after all rows loaded.
     println!("Creating indexes.");
-    create_indexes(&mut conn1, DEFAULT_OUTPUT_TABLE);
+    create_indexes(&mut conn1);
 
     // Print results.
     println!("\nElapsed time: {:.2?}", before.elapsed());
@@ -199,11 +245,67 @@ fn load_db_url() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// get_config:
+// ---------------------------------------------------------------------------
+fn get_config() -> Config {
+    // Read command-line args.
+    let args: Vec<String> = env::args().collect();
+
+    // Initialize local variables.
+    let program_pathname  = args[0].clone();
+    let mut input_table = "stampede2".to_string();
+    let mut output_table  = DEFAULT_OUTPUT_TABLE.to_string();
+    let mut ignore_dups = false;
+
+    // Let's inspect the command line for other arguments.
+    if args.len() > 1 {
+        // The current number of arguments can only be 3 or 5.
+        if (args.len() % 2) == 0 {
+            panic!("1");
+        }
+
+        // Start with the first argument pair.
+        let mut index = 1;
+        while (index + 1) < args.len() {
+            // Get the key and value.
+            let key = &args[index];
+            let val = &args[index+1];
+
+            // See if they are known arguments.
+            // --- Output Table
+            if key == "-output_table" {
+                output_table = val.clone();
+            } 
+            // --- Intput Table
+            else if key == "-input_table" {
+                input_table = val.clone();
+            }
+            // --- Ignore Duplicate Inserts
+            else if key == "-ignore_dups" {
+                if val == "true" {
+                    ignore_dups = true;
+                }
+            }
+            // --- Abort on Unknown Parameter
+            else {
+                panic!("2");
+            }
+
+            // Increment to next pair.
+            index += 2;
+        }
+    } 
+
+    Config {program_pathname, input_table, output_table, ignore_dups}
+}
+
+// ---------------------------------------------------------------------------
 // create_output_table:
 // ---------------------------------------------------------------------------
-fn create_output_table(conn: &mut PooledConn, table_name: &str) {
+fn create_output_table(conn: &mut PooledConn) {
 
     // Drop the output table if it already exists.
+    let table_name = &CONFIG.output_table;
     conn.query_drop("DROP TABLE IF EXISTS ".to_owned() + table_name).expect("Drop table failure.");
 
     // Create a new table.
@@ -222,8 +324,9 @@ fn create_output_table(conn: &mut PooledConn, table_name: &str) {
 // ---------------------------------------------------------------------------
 // create_indexes:
 // ---------------------------------------------------------------------------
-fn create_indexes(conn: &mut PooledConn, table_name: &str) {
+fn create_indexes(conn: &mut PooledConn) {
     // Create indexes on output table.
+    let table_name = &CONFIG.output_table;
     conn.query_drop("CREATE INDEX index_submit ON ".to_owned() + table_name + " (submit)").expect("Create index 1 failure.");
     conn.query_drop("CREATE INDEX index_start ON ".to_owned() + table_name + " (start)").expect("Create index 2 failure.");
     conn.query_drop("CREATE INDEX index_max_minutes ON ".to_owned() + table_name + " (max_minutes)").expect("Create index 3 failure.");
@@ -238,7 +341,7 @@ fn create_indexes(conn: &mut PooledConn, table_name: &str) {
 fn write_output(conn: &mut PooledConn, recs: Vec<DBtarget>) -> (i32, i32) {
 
     // Prepare the insert statement so it can be reused by the database.
-    let stmt = get_insert_stmt(conn, DEFAULT_OUTPUT_TABLE);
+    let stmt = get_insert_stmt(conn);
 
     // ---- Set automcommit off on this connection so that inserts are committed in bulk.
     conn.query_drop("SET autocommit=0").expect("Set autocommit OFF failure.");
@@ -293,12 +396,21 @@ fn write_output(conn: &mut PooledConn, recs: Vec<DBtarget>) -> (i32, i32) {
 // ---------------------------------------------------------------------------
 // get_insert_stmt:
 // ---------------------------------------------------------------------------
-fn get_insert_stmt(conn: &mut PooledConn, table_name: &str) -> Statement {
-    // Build the insert statement with placeholders.
-    let insert = "INSERT INTO :table_name \
+fn get_insert_stmt(conn: &mut PooledConn) -> Statement {
+    // Assign configuration parameters to placeholder values.
+    let ignore = if CONFIG.ignore_dups {
+        "IGNORE"
+    } else {
+        ""
+    };
+    let table_name = &CONFIG.output_table;
+
+    // Build the insert statement with placeholders filled in.
+    let insert1 = "INSERT :ignore INTO :table_name \
             (jobid, submit, start, max_minutes, queue_minutes, backlog_minutes, backlog_num_jobs) \
             VALUES (:jobid, :submit, :start, :max_minutes, :queue_minutes, :backlog_minutes, :backlog_num_jobs)";
-    let insert_cmd = insert.replacen(":table_name", table_name, 1);
+    let insert2 = insert1.replacen(":ignore", ignore, 1);
+    let insert_cmd = insert2.replacen(":table_name", table_name, 1);
     conn.prep(insert_cmd).expect("Prepare statement failure.")
 }
 
@@ -382,3 +494,23 @@ mod tests {
         };
     }
 }
+
+// Add regex 1.7.1 or later to Cargo.toml to run this test.
+// #[test]
+//     fn test_regex() {
+//         let regex = Regex::new("^([[:alnum:]_]+)=([[:alnum:]_]+$)").unwrap();
+//         assert!(regex.is_match("abc_d=3"));
+//         assert!(regex.is_match("6=3"));
+//         assert!(regex.is_match("_abc_d=__"));
+
+//         assert!(!regex.is_match("abc_d =3"));
+//         assert!(!regex.is_match("abc_d= 3"));
+//         assert!(!regex.is_match("abc_d = 3"));
+//         assert!(!regex.is_match("abc_d=3 "));
+//         assert!(!regex.is_match(" abc_d=3"));
+
+//         let cap = regex.captures("abc_d=3").unwrap();
+//         assert_eq!("abc_d=3".to_string(), cap[0].to_string());
+//         assert_eq!("abc_d".to_string(), cap[1].to_string());
+//         assert_eq!("3".to_string(), cap[2].to_string());
+//     }
