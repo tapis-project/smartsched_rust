@@ -242,7 +242,7 @@ fn get_config() -> Config {
     // Initialize local variables.
     let program_pathname  = args[0].clone();
     let mut input_table = "stampede2".to_string();
-    let mut output_table  = DEFAULT_OUTPUT_TABLE.to_string();
+    let mut output_table = DEFAULT_OUTPUT_TABLE.to_string();
     let mut ignore_dups = false;
 
     // Let's inspect the command line for other arguments.
