@@ -455,6 +455,15 @@ fn get_absolute_path(path: &str) -> String {
 mod tests {
     use mysql::*;
     use mysql::prelude::*;
+    use std::{fs};
+
+    // ------------------ In Scope Support Definitions
+    // Hardcode where url/credentials file resides.
+    const DB_URL_FILE: &str = "/<YOUR_PATH_GOES_HERE>/smartsched-db.url";
+    fn load_db_url_for_test() -> String {
+        fs::read_to_string(DB_URL_FILE).expect("Failed to load mysql url from file.")
+    }
+    // ------------------ End Support Definitions
 
     #[test]
     fn count_rows() {
@@ -464,9 +473,9 @@ mod tests {
         //let clause = "";
 
         // Connect to the database.
-        let url = "mysql://remoteconnection:19slowBASE!french66@129.114.35.200:3306/HPC_Job_Database";
+        let url = load_db_url_for_test();
         //let opts = Opts::from_url(url).unwrap(); 
-        let pool = Pool::new(url).unwrap();
+        let pool = Pool::new(url.as_str()).unwrap();
         let mut conn = pool.get_conn().unwrap();
 
         // Issue a query.
