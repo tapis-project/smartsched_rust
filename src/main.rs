@@ -9,12 +9,19 @@ use std::env;
 use lazy_static::lazy_static;
 use path_absolutize::Absolutize;
 
+//
+// SEE HELP MESSAGE FOR USAGE NOTES.
+//
+
 // ***************************************************************************
 //                                Constants
 // ***************************************************************************
 // The file that contains the complete mysql database url, including password.
 const DB_URL_FILE: &str = "~/smartsched-db.url";
-const DEFAULT_OUTPUT_TABLE: &str = "jobq_history";
+const OUTPUT_TABLE_PREFIX: &str = "jobq_";
+const OUTPUT_TABLE_SUFFIX: &str = "";
+const INVALID_TABLE: &str = "INVALID_TABLE";
+const INVALID_QUEUE: &str = "INVALID_QUEUE";
 const DEFAULT_READ_BATCH_SIZE: i32 = 10000;
 const DEFAULT_WRITE_BATCH_SIZE: i32 = 1000;
 
@@ -25,7 +32,7 @@ const DEFAULT_WRITE_BATCH_SIZE: i32 = 1000;
 // We exit if we can't read our parameters.
 lazy_static! {
     // This regex matches "key=value" arguments where key and value are 
-        // alphanumeric or underscore and there is no embedded whitespace.
+    // alphanumeric or underscore and there is no embedded whitespace.
     static ref CONFIG: Config = get_config();
 }
 
@@ -38,18 +45,23 @@ lazy_static! {
 pub struct Config {
     pub program_pathname: String,
     pub input_table: String,
-    pub output_table: String,
+    pub output_table_suffix: String,
+    pub queue: String,
     pub ignore_dups: bool,
+    pub output_table: String,  // automatically generated (not user specified)
+    pub help: bool,
 }
 
 impl Config {
     #[allow(dead_code)]
-    fn new(program_pathname: String, input_table: String, output_table: String, ignore_dups: bool) -> Config {
-        Config {program_pathname, input_table, output_table, ignore_dups}
+    fn new(program_pathname: String, input_table: String, output_table_suffix: String, queue: String, 
+        ignore_dups: bool, output_table: String, help: bool) -> Config {
+        Config {program_pathname, input_table, output_table_suffix, queue, ignore_dups, output_table, help}
     }
 
     fn println(&self) {
-        println!("Input configuration:  input_table={}, output_table={}, ignore_dups={}\n", self.input_table, self.output_table, self.ignore_dups);
+        println!("Input configuration:  input_table={}, output_table_suffix={}, queue={}, ignore_dups={}, output_table={}, help={}\n", 
+                 self.input_table, self.output_table_suffix, self.queue, self.ignore_dups, self.output_table, self.help);
     }
 }
 
@@ -61,19 +73,22 @@ pub struct DBsource {
     pub jobid: String,
     pub submit: NaiveDateTime,
     pub start: NaiveDateTime,
+    pub end: NaiveDateTime,
     pub max_minutes: i32,
     pub queue_minutes: i32,
+    pub run_minutes: i32,
 }
 
 impl DBsource {
-    fn new(jobid: String, submit: NaiveDateTime, start: NaiveDateTime, max_minutes: i32, queue_minutes: i32) -> DBsource {
-        DBsource { jobid, submit, start, max_minutes, queue_minutes}
+    fn new(jobid: String, submit: NaiveDateTime, start: NaiveDateTime, end: NaiveDateTime, 
+           max_minutes: i32, queue_minutes: i32, run_minutes: i32) -> DBsource {
+        DBsource { jobid, submit, start, end, max_minutes, queue_minutes, run_minutes }
     }
 }
 
 impl fmt::Display for DBsource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}, {}, {}, {}, {}", self.jobid, self.submit, self.start, self.max_minutes, self.queue_minutes)
+        write!(f, "{}, {}, {}, {}, {}, {}, {}", self.jobid, self.submit, self.start, self.end, self.max_minutes, self.queue_minutes, self.run_minutes)
     }
 }
 
@@ -87,21 +102,24 @@ pub struct DBtarget {
     pub start: NaiveDateTime,
     pub max_minutes: i32,
     pub queue_minutes: i32,
+    pub run_minutes: i32,
     pub backlog_minutes: i32,
     pub backlog_num_jobs: i32,
+    pub running_minutes: i32,
+    pub running_num_jobs: i32,
 }
 
 impl DBtarget {
-    fn new(src: DBsource, backlog_minutes: i32, backlog_num_jobs: i32) -> DBtarget {
+    fn new(src: DBsource, backlog_minutes: i32, backlog_num_jobs: i32, running_minutes: i32, running_num_jobs: i32) -> DBtarget {
         DBtarget {jobid: src.jobid, submit: src.submit, start: src.start, max_minutes: src.max_minutes, queue_minutes: src.queue_minutes,
-                  backlog_minutes, backlog_num_jobs}
+                  run_minutes: src.run_minutes, backlog_minutes, backlog_num_jobs, running_minutes, running_num_jobs}
     }
 }
 
 impl fmt::Display for DBtarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}, {}, {}, {}, {}, {}, {}", self.jobid, self.submit, self.start, self.max_minutes, self.queue_minutes,
-                                                self.backlog_minutes, self.backlog_num_jobs)
+        write!(f, "{}, {}, {}, {}, {}, {}, {}, {}, {}, {}", self.jobid, self.submit, self.start, self.max_minutes, self.queue_minutes,
+                            self.run_minutes, self.backlog_minutes, self.backlog_num_jobs, self.running_minutes, self.running_num_jobs)
     }
 }
 
@@ -120,17 +138,25 @@ impl fmt::Display for DBtarget {
  * destination for this information would a database.
  */
 fn main() {
-    // Connection information including password.
+    // Force parameter processing.
     CONFIG.println();
+    if CONFIG.help {
+        print_help();
+        return;
+    }
+
+    // Connection information including password.
     let url = load_db_url();
     
     // Adjust query as needed.
-    let select1 = "SELECT jobid, submit, start, max_minutes, \
-                       TIMESTAMPDIFF(MINUTE, submit, start) as queue_minutes \
+    let select1 = "SELECT jobid, submit, start, end, max_minutes, \
+                       TIMESTAMPDIFF(MINUTE, submit, start) as queue_minutes, \
+                       TIMESTAMPDIFF(MINUTE, start, end) as run_minutes \
                        FROM :input_table \
-                       WHERE queue = 'normal' AND state = 'COMPLETED' \
+                       WHERE queue = ':queue' AND state = 'COMPLETED' \
                        ORDER BY submit ASC";
-    let select = select1.replacen(":input_table", &CONFIG.input_table, 1);
+    let select2 = select1.replacen(":input_table", &CONFIG.input_table, 1);
+    let select  = select2.replacen(":queue", &CONFIG.queue, 1);
 
     // Connect to the database and panic if we can't.
     let pool = Pool::new(url.as_str()).expect("Failed to create pool.");
@@ -140,7 +166,8 @@ fn main() {
     create_output_table(&mut conn1);
 
     // Create the queue with a capacity not likely to be exceeded.
-    let mut backlog_queue: Vec<DBsource> = Vec::with_capacity(256);
+    let mut backlog_queue: Vec<DBsource> = Vec::with_capacity(2000);
+    let mut running_jobs:  Vec<DBsource> = Vec::with_capacity(2000);
     let mut output_records: Vec<DBtarget> =  Vec::with_capacity(4000000);
 
     // Set up the database download.
@@ -154,42 +181,84 @@ fn main() {
         match row {
             Ok(a) => {
                 // Decode the database row.
-                let r = from_row::<(String, String, String, i32, i32)>(a);
+                let r: (String, String, String, String, i32, i32, i32) = from_row::<(String, String, String, String, i32, i32, i32)>(a);
                 let cur_job = DBsource::new(
                     r.0,
                     NaiveDateTime::parse_from_str(r.1.as_str(), "%Y-%m-%d %H:%M:%S").expect("Submit decode failure."),
                     NaiveDateTime::parse_from_str(r.2.as_str(), "%Y-%m-%d %H:%M:%S").expect("Start decode failure."),
-                    r.3,
+                    NaiveDateTime::parse_from_str(r.3.as_str(), "%Y-%m-%d %H:%M:%S").expect("End decode failure."),
                     r.4,
+                    r.5,
+                    r.6,
                 );
 
+                // ------------------- Identify Queued Jobs -------------------
                 // Set up for analyzing the current job's queue.
-                let mut keep: Vec<bool> = Vec::with_capacity(backlog_queue.len());
-                let mut cur_backlog_len = 0;
+                let mut queue_keep: Vec<bool> = Vec::with_capacity(backlog_queue.len());
+                let mut cur_backlog_num_jobs = 0;
                 let mut cur_queue_minutes = 0;
 
                 // Iterate through existing backlog queue looking for jobs whose start
                 // time has not occurred when the current job was submitted.
                 for backlog_job in &backlog_queue {
                     if backlog_job.start > cur_job.submit {
-                        cur_backlog_len += 1;
+                        // Collect queue statistics.
+                        cur_backlog_num_jobs += 1;
                         cur_queue_minutes += backlog_job.max_minutes;
-                        keep.push(true); // This element stays in queue.
+                        queue_keep.push(true); // This element stays in queue.
                     } else {
+                        // Promote backlog job to running job if
+                        // its end time is still in the future.
+                        if backlog_job.end > cur_job.submit {
+                            running_jobs.push(backlog_job.clone());
+                        }
+
                         // Mark current queue element for removal.
-                        keep.push(false);
+                        queue_keep.push(false);
                     }
                 }
 
-                // Remove the backlog jobs marked for removal.
-                let mut iter = keep.iter();
-                backlog_queue.retain(|_| *iter.next().expect("backlog.queue.retain failure"));
+                // Delete the backlog jobs marked for removal.
+                let mut iter1 = queue_keep.iter();
+                backlog_queue.retain(|_| *iter1.next().expect("backlog.queue.retain failure"));
 
-                // Push the current ob onto the backlog queue.
-                backlog_queue.push(cur_job.clone());
+                // ------------------- Identify Running Jobs -------------------
+                // Set up for analyzing the jobs currently running.
+                let mut run_keep: Vec<bool> = Vec::with_capacity(running_jobs.len());
+                let mut cur_running_num_jobs = 0;
+                let mut cur_running_minutes = 0;
 
+                // Iterate through existing running jobs list looking for jobs 
+                // that have terminated by the time the current job was submitted.
+                for running_job in &running_jobs {
+                    if  running_job.end > cur_job.submit {
+                            run_keep.push(false); // will be removed
+                       } else {
+                            // Collect running job statistics.
+                            cur_running_num_jobs += 1;
+                            cur_running_minutes += running_job.max_minutes;
+                            run_keep.push(true);
+                       }
+                }
+
+                // Delete the running jobs marked for removal.
+                let mut iter2 = run_keep.iter();
+                running_jobs.retain(|_| *iter2.next().expect("running.job.retain failure"));
+
+                // ------------------- Assign Current Job ----------------------
+                // We almost always push the current job onto the backlog queue,
+                // but since the inputs might not be perfect we account for the
+                // possibility that jobs immediately start running.
+                if cur_job.start > cur_job.submit {
+                    backlog_queue.push(cur_job.clone());
+                } else {
+                    running_jobs.push(cur_job.clone());
+                }
+
+                // ------------------- Save Current Job ------------------------
                 // Create the current job's output record.
-                let cur_job_output = DBtarget::new(cur_job, cur_queue_minutes, cur_backlog_len);           
+                let cur_job_output = DBtarget::new(cur_job, cur_queue_minutes, cur_backlog_num_jobs,
+                                                             cur_running_minutes, cur_running_num_jobs);           
                 output_records.push(cur_job_output);
                 
                 // Print a message every time we commit a group of output records.
@@ -241,50 +310,82 @@ fn get_config() -> Config {
 
     // Initialize local variables.
     let program_pathname  = args[0].clone();
-    let mut input_table = "stampede2".to_string();
-    let mut output_table = DEFAULT_OUTPUT_TABLE.to_string();
+    let mut input_table = INVALID_TABLE.to_string();
+    let mut output_table_suffix = OUTPUT_TABLE_SUFFIX.to_string();
+    let mut queue: String = INVALID_QUEUE.to_string();
     let mut ignore_dups = false;
+    let mut help: bool = false;
 
-    // Let's inspect the command line for other arguments.
-    if args.len() > 1 {
-        // The current number of arguments can only be 3 or 5.
-        if (args.len() % 2) == 0 {
-            panic!("1");
+    // Force help when no arguments are given.
+    if args.len() <= 1 {
+        help = true;
+    }
+
+    // Check for help which is a standalone flag, no value.
+    for key in &args {
+        if key == "-help" || key == "--help" {
+            help = true;
+//            return Config::new(program_pathname, input_table, output_table_suffix, queue, ignore_dups, "".to_string(), help);   
+        }
+    }
+
+    // Start with the first argument pair.
+    let mut index = 1;
+     while (index + 1) < args.len() {
+        // Get the key and value.
+        let key = &args[index];
+        let val = &args[index+1];
+
+        // See if they are known arguments.
+        // --- Output Table
+        if key == "-output_table_suffix" {
+            output_table_suffix = val.clone();
+        } 
+        // --- Input Table
+        else if key == "-input_table" {
+            input_table = val.clone();
+        }
+        // --- Queue
+        else if key == "-queue" {
+            queue = val.clone();
+        }
+        // --- Ignore Duplicate Inserts
+        else if key == "-ignore_dups" {
+            if val == "true" {
+                ignore_dups = true;
+            }
+        }
+        else if key == "-help" || key == "--help" {
+            // Help is handled separately above, but since
+            // help doesn't take a value we have to only
+            // increment the indext by 1.
+            index += 1;
+            continue;
+        }
+        // --- Abort on Unknown Parameter
+        else {
+            panic!("2");
         }
 
-        // Start with the first argument pair.
-        let mut index = 1;
-        while (index + 1) < args.len() {
-            // Get the key and value.
-            let key = &args[index];
-            let val = &args[index+1];
+        // Increment to next pair.
+        index += 2;
+    }
 
-            // See if they are known arguments.
-            // --- Output Table
-            if key == "-output_table" {
-                output_table = val.clone();
-            } 
-            // --- Intput Table
-            else if key == "-input_table" {
-                input_table = val.clone();
-            }
-            // --- Ignore Duplicate Inserts
-            else if key == "-ignore_dups" {
-                if val == "true" {
-                    ignore_dups = true;
-                }
-            }
-            // --- Abort on Unknown Parameter
-            else {
-                panic!("2");
-            }
+    let output_table = make_output_table_name(&input_table, &output_table_suffix, &queue);
+    Config {program_pathname, input_table, output_table_suffix, queue, ignore_dups, output_table, help}
+}
 
-            // Increment to next pair.
-            index += 2;
-        }
-    } 
-
-    Config {program_pathname, input_table, output_table, ignore_dups}
+// ---------------------------------------------------------------------------
+// make_output_table_name:
+// ---------------------------------------------------------------------------
+/** Concatenate the output table name from user-supplied and constant strings.
+ */
+fn make_output_table_name(input_table: &String, output_table_suffix: &String, queue: &String) -> String {
+    let mut tname = OUTPUT_TABLE_PREFIX.to_owned() + input_table + "_" + queue;
+    if !output_table_suffix.is_empty() {
+        tname = tname + "_" + output_table_suffix;
+    }
+    tname
 }
 
 // ---------------------------------------------------------------------------
@@ -303,8 +404,11 @@ fn create_output_table(conn: &mut PooledConn) {
                              start datetime NOT NULL, \
                              max_minutes int unsigned NOT NULL, \
                              queue_minutes int unsigned NOT NULL, \
+                             run_minutes int unsigned NOT NULL, \
                              backlog_minutes int unsigned NOT NULL, \
-                             backlog_num_jobs int unsigned NOT NULL)";
+                             backlog_num_jobs int unsigned NOT NULL, \
+                             running_minutes int unsigned NOT NULL, \
+                             running_num_jobs int unsigned NOT NULL)";
     let create_cmd = create_table.replacen(":table_name", table_name, 1);
     conn.query_drop(create_cmd).expect("Create table failure.");
 }
@@ -319,8 +423,11 @@ fn create_indexes(conn: &mut PooledConn) {
     conn.query_drop("CREATE INDEX index_start ON ".to_owned() + table_name + " (start)").expect("Create index 2 failure.");
     conn.query_drop("CREATE INDEX index_max_minutes ON ".to_owned() + table_name + " (max_minutes)").expect("Create index 3 failure.");
     conn.query_drop("CREATE INDEX index_queue_minutes ON ".to_owned() + table_name + " (queue_minutes)").expect("Create index 4 failure.");
-    conn.query_drop("CREATE INDEX index_backlog_minutes ON ".to_owned() + table_name + " (backlog_minutes)").expect("Create index 5 failure.");
-    conn.query_drop("CREATE INDEX index_backlog_num_jobs ON ".to_owned() + table_name + " (backlog_num_jobs)").expect("Create index 6 failure.");
+    conn.query_drop("CREATE INDEX index_run_minutes ON ".to_owned() + table_name + " (run_minutes)").expect("Create index 5 failure.");
+    conn.query_drop("CREATE INDEX index_backlog_minutes ON ".to_owned() + table_name + " (backlog_minutes)").expect("Create index 6 failure.");
+    conn.query_drop("CREATE INDEX index_backlog_num_jobs ON ".to_owned() + table_name + " (backlog_num_jobs)").expect("Create index 7 failure.");
+    conn.query_drop("CREATE INDEX index_running_minutes ON ".to_owned() + table_name + " (running_minutes)").expect("Create index 8 failure.");
+    conn.query_drop("CREATE INDEX index_running_num_jobs ON ".to_owned() + table_name + " (running_num_jobs)").expect("Create index 9 failure.");
 }
 
 // ---------------------------------------------------------------------------
@@ -345,8 +452,11 @@ fn write_output(conn: &mut PooledConn, recs: Vec<DBtarget>) -> (i32, i32) {
             "start" =>  rec.start.to_string(),
             "max_minutes" => rec.max_minutes,
             "queue_minutes" => rec.queue_minutes,
+            "run_minutes" => rec.run_minutes,
             "backlog_minutes" => rec.backlog_minutes,
             "backlog_num_jobs" => rec.backlog_num_jobs,
+            "running_minutes" => rec.running_minutes,
+            "running_num_jobs" => rec.running_num_jobs,
         }) {
             Ok(_) => {
                 // Commit at a different interval than printing progress messages.
@@ -395,8 +505,8 @@ fn get_insert_stmt(conn: &mut PooledConn) -> Statement {
 
     // Build the insert statement with placeholders filled in.
     let insert1 = "INSERT :ignore INTO :table_name \
-            (jobid, submit, start, max_minutes, queue_minutes, backlog_minutes, backlog_num_jobs) \
-            VALUES (:jobid, :submit, :start, :max_minutes, :queue_minutes, :backlog_minutes, :backlog_num_jobs)";
+            (jobid, submit, start, max_minutes, queue_minutes, run_minutes, backlog_minutes, backlog_num_jobs, running_minutes, running_num_jobs) \
+            VALUES (:jobid, :submit, :start, :max_minutes, :queue_minutes, :run_minutes, :backlog_minutes, :backlog_num_jobs, :running_minutes, :running_num_jobs)";
     let insert2 = insert1.replacen(":ignore", ignore, 1);
     let insert_cmd = insert2.replacen(":table_name", table_name, 1);
     conn.prep(insert_cmd).expect("Prepare statement failure.")
@@ -448,6 +558,31 @@ fn get_absolute_path(path: &str) -> String {
     p2.to_owned()
 }
 
+// ---------------------------------------------------------------------------
+// print_help:
+// ---------------------------------------------------------------------------
+fn print_help() {
+    // There's probably a better way to do this...
+    let msg = "Smart Scheduling Time Series Analysis\n\n \
+    This program takes as input the SQL table data produced by HPCDataLoad.py in the\n \
+    smart-scheduling project (https://github.com/tapis-project/smart-scheduling)\n \
+    and calculates for each job the current state of the queue and running programs\n \
+    on the HPC system when the job was submitted.\n\n \
+    The following parameters can be set:\n\n \
+        \t-help - to print this message\n \
+        \t-input_table - (REQUIRED) the source historical job data\n \
+        \t-queue - (REQUIRED) the HPC queue or partition on which the jobs were scheduled\n \
+        \t-output_table_suffix - a suffix appended to the output table name\n \
+        \t-ignore_dups - ignore attempts to insert duplicate records into the output table\n\n \
+    Results are written to a new output table with a name that conforms to the format:\n\n \
+        \tjobq_<input_table>_<queue>[_output_table_suffix]\n\n \
+    If a required parameter is not given, the program aborts.  For example, here are parameters\n \
+    that specify processing all jobs from the normal queue of stampede2 and putting the results\n \
+    in the jobq_stampede2_normal_test output table:\n\n \
+        \tsmartsched_rust -input_table stampede2 -queue normal -output_table_suffix test\n";
+    println!("{}", msg);
+}
+
 // ***************************************************************************
 //                                 Tests
 // ***************************************************************************
@@ -455,7 +590,7 @@ fn get_absolute_path(path: &str) -> String {
 mod tests {
     use mysql::*;
     use mysql::prelude::*;
-    use std::{fs};
+    use std::fs;
 
     // ------------------ In Scope Support Definitions
     // Hardcode where url/credentials file resides.
