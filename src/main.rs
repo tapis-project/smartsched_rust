@@ -325,7 +325,6 @@ fn get_config() -> Config {
     for key in &args {
         if key == "-help" || key == "--help" {
             help = true;
-//            return Config::new(program_pathname, input_table, output_table_suffix, queue, ignore_dups, "".to_string(), help);   
         }
     }
 
@@ -364,12 +363,22 @@ fn get_config() -> Config {
         }
         // --- Abort on Unknown Parameter
         else {
-            panic!("2");
+            panic!("{}", "**** Unrecognized parameter: ".to_string() + key + ", see -help");
         }
 
         // Increment to next pair.
         index += 2;
     }
+
+    // Verification checking.
+    if !help {
+        if input_table.eq(INVALID_TABLE) {
+            panic!("**** The input_table parameter is required, see -help.");
+        }
+        if queue.eq(INVALID_QUEUE) {
+            panic!("**** The queue parameter is required, see -help.");
+        }
+    }   
 
     let output_table = make_output_table_name(&input_table, &output_table_suffix, &queue);
     Config {program_pathname, input_table, output_table_suffix, queue, ignore_dups, output_table, help}
@@ -381,7 +390,10 @@ fn get_config() -> Config {
 /** Concatenate the output table name from user-supplied and constant strings.
  */
 fn make_output_table_name(input_table: &String, output_table_suffix: &String, queue: &String) -> String {
-    let mut tname = OUTPUT_TABLE_PREFIX.to_owned() + input_table + "_" + queue;
+    // Sanitize queue names.
+    let new_queue = queue.replace("-", "_");
+
+    let mut tname = OUTPUT_TABLE_PREFIX.to_owned() + input_table + "_" + &new_queue;
     if !output_table_suffix.is_empty() {
         tname = tname + "_" + output_table_suffix;
     }
