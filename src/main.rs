@@ -269,7 +269,7 @@ fn main() {
             },
             Err(e) => {
                 num_rows += 1; num_row_err += 1;
-                println!("Error reading row {}: {}", num_rows, e);
+                println!("**** Error reading row {}: {}", num_rows, e);
             },
         };
     });
@@ -389,9 +389,9 @@ fn get_config() -> Config {
 // ---------------------------------------------------------------------------
 /** Concatenate the output table name from user-supplied and constant strings.
  */
-fn make_output_table_name(input_table: &String, output_table_suffix: &String, queue: &String) -> String {
+fn make_output_table_name(input_table: &String, output_table_suffix: &String, queue: &str) -> String {
     // Sanitize queue names.
-    let new_queue = queue.replace("-", "_");
+    let new_queue = queue.replace('-', "_");
 
     let mut tname = OUTPUT_TABLE_PREFIX.to_owned() + input_table + "_" + &new_queue;
     if !output_table_suffix.is_empty() {
